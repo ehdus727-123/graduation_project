@@ -50,7 +50,7 @@ pages = {
     ],
     "자동 태깅": [
         st.Page("views/labeling.py", title="라벨링", icon="🏷️"),
-        st.Page("views/train.py", title="학습 실행", icon="🧠"),
+        st.Page("views/train.py", title="학습 현황", icon="🧠"),
         st.Page("views/predictions.py", title="예측 확인", icon="🤖"),
         st.Page("views/tags_admin.py", title="태그 관리", icon="🗂️"),
     ],

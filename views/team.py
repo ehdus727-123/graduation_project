@@ -50,13 +50,13 @@ new_labels = team.labels_since(labels, when)
 if when is None and status["trainable"].any():
     todo += 1
     st.info(f"학습 가능한 태그가 {int(status['trainable'].sum())}개 있지만 아직 학습하지 않았습니다. "
-            "한 명이 **학습 실행**을 누르면 팀 전체에 AI 추천이 생깁니다.")
-    st.page_link("views/train.py", label="학습 실행으로 이동", icon="🧠")
+            "이미지가 있는 PC 한 곳에서 `training.py`를 실행하면 팀 전체에 AI 추천이 생깁니다.")
+    st.page_link("views/train.py", label="학습 현황 · 실행 방법 보기", icon="🧠")
 elif new_labels:
     todo += 1
     st.info(f"마지막 학습({predictions_source()}) 이후 새 라벨 **{new_labels}건**이 쌓였습니다. "
-            "다시 학습하면 AI 추천이 더 정확해집니다.")
-    st.page_link("views/train.py", label="학습 실행으로 이동", icon="🧠")
+            "로컬 PC에서 다시 학습하면 AI 추천이 더 정확해집니다.")
+    st.page_link("views/train.py", label="학습 현황 · 실행 방법 보기", icon="🧠")
 
 lacking = status[~status["trainable"]]
 if not lacking.empty:

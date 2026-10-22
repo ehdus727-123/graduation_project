@@ -186,33 +186,86 @@ def read_predictions() -> pd.DataFrame:
     return pd.read_csv(PRED_CSV, dtype={"image_id": str, "tag_key": str}, encoding="utf-8-sig")
 
 
-def publish_predictions(preds: pd.DataFrame, model: str) -> int:
-    """예측을 DB(predictions)에 올려 팀 전체가 같은 결과를 보게 한다. 올린 행 수를 돌려준다.
+# ---------- 팀 공유 예측 (학습 묶음 단위) ----------
+# 학습 한 번 = training_runs 한 행. 예측은 그 run_id로 여러 번에 나눠 올리고, 다 올라가면 finish_training_run()으로
+# '완료' 표시한다. 웹앱은 가장 최근에 완료된 학습의 예측만 읽으므로 올리는 도중·실패한 학습은 팀 화면에 보이지 않는다.
 
-    - 같은 실행의 행은 모두 같은 predicted_at을 가진다. 읽을 때는 가장 최근 실행의 행만 쓰므로,
-      이번에 학습하지 않은 태그의 예전 예측은 자동으로 빠진다 (팀원 키로는 삭제 권한이 없어서 이 방식을 쓴다).
-    - 한 번의 요청으로 보낸다 → 전부 저장되거나 전부 실패 (일부만 바뀐 상태가 최신으로 보이지 않게).
-    - DB에 없는 이미지(로컬에만 있는 이미지)는 외래키 오류가 나므로 뺀다.
+UPLOAD_CHUNK = 5000   # 한 요청에 보내는 예측 행 수 (약 0.8MB)
+UPLOAD_RETRIES = 3    # 요청 하나가 실패하면 다시 보내는 횟수 (같은 행은 덮어쓰므로 다시 보내도 안전)
+RUN_COLUMNS = "run_id, started_at, completed_at, trainer, embed_model, n_images, n_rows, report"
+
+
+def known_image_ids() -> set[str]:
+    """DB images에 등록된 이미지. 등록되지 않은 이미지의 예측은 외래키 때문에 공유할 수 없다."""
+    return {str(r["id"]) for r in _db_call(db.fetch_all, "images", "id")}
+
+
+def start_training_run(trainer: str, embed_model: str, n_images: int, report: list[dict]) -> str:
+    """학습 기록을 '올리는 중' 상태로 만들고 run_id를 돌려준다."""
+    import uuid
+    if not trainer.strip():
+        raise TagError("학습한 사람 이름이 비어 있습니다.")
+    db.check_write()
+    run_id = str(uuid.uuid4())
+    row = {"run_id": run_id, "trainer": trainer.strip(), "embed_model": embed_model, "n_images": int(n_images),
+           "report": report}
+    _db_call(lambda: db.get_client().table("training_runs").insert(row, returning="minimal").execute())
+    return run_id
+
+
+def upload_predictions(run_id: str, preds: pd.DataFrame, model: str, known: set[str] | None = None,
+                       progress=None) -> int:
+    """예측을 UPLOAD_CHUNK행씩 나눠 올린다. 올린 행 수를 돌려준다. progress(올린 수, 전체 수)는 선택.
+
+    known(DB에 있는 이미지 id)에 없는 이미지는 뺀다. 요청 하나가 실패하면 UPLOAD_RETRIES번까지 다시 보낸다.
     """
-    known = {r["id"] for r in _db_call(db.fetch_all, "images", "id")}
-    p = preds[preds["image_id"].astype(str).isin(known)]
-    run_at = _now()
-    rows = [{"image_id": str(i), "tag_key": k, "prob": round(min(max(float(v), 0.0), 1.0), 4),
-             "model": model, "predicted_at": run_at}
-            for i, k, v in zip(p["image_id"], p["tag_key"], p["prob"])]
-    if rows:
-        _db_call(db.upsert, "predictions", rows, on_conflict="image_id,tag_key", chunk=len(rows))
-    return len(rows)
+    db.check_write()
+    p = preds if known is None else preds[preds["image_id"].astype(str).isin(known)]
+    total = len(p)
+    probs = p["prob"].astype(float).clip(0.0, 1.0).round(4)
+    for start in range(0, total, UPLOAD_CHUNK):
+        part = slice(start, start + UPLOAD_CHUNK)  # 행 dict는 조각마다 만든다 (수십만 행을 한꺼번에 만들지 않게)
+        rows = [{"run_id": run_id, "image_id": str(i), "tag_key": k, "prob": float(v), "model": model}
+                for i, k, v in zip(p["image_id"].iloc[part], p["tag_key"].iloc[part], probs.iloc[part])]
+        for attempt in range(1, UPLOAD_RETRIES + 1):
+            try:
+                _db_call(lambda: db.get_client().table("predictions")
+                         .upsert(rows, on_conflict="run_id,image_id,tag_key", returning="minimal").execute())
+                break
+            except db.DBError:
+                if attempt == UPLOAD_RETRIES:
+                    raise
+                time.sleep(2 * attempt)
+        if progress:
+            progress(min(start + UPLOAD_CHUNK, total), total)
+    return total
 
 
-def load_shared_predictions() -> pd.DataFrame:
-    """DB의 팀 공유 예측 중 가장 최근 학습 실행의 것. 컬럼: image_id, tag_key, prob, model, predicted_at."""
-    cols = ["image_id", "tag_key", "prob", "model", "predicted_at"]
-    df = pd.DataFrame(_db_call(db.fetch_all, "predictions", ", ".join(cols)), columns=cols)
-    if df.empty:
-        return df
-    at = pd.to_datetime(df["predicted_at"], utc=True, format="ISO8601")  # 문자열 비교는 소수점 자리수에 따라 틀릴 수 있다
-    df = df[at == at.max()].reset_index(drop=True)
+def finish_training_run(run_id: str) -> None:
+    """다 올라간 학습을 '완료'로 표시한다. 이때부터 팀 화면에 보이고, 그보다 먼저 시작한 학습의 예측은 지워진다."""
+    db.check_write()
+    _db_call(lambda: db.get_client().rpc("finish_training_run", {"p_run": run_id}).execute())
+
+
+def latest_training_run() -> dict | None:
+    """가장 최근에 완료된 학습 기록 (없으면 None)."""
+    rows = _db_call(lambda: db.get_client().table("training_runs").select(RUN_COLUMNS)
+                    .not_.is_("completed_at", "null").order("completed_at", desc=True).limit(1).execute().data)
+    return rows[0] if rows else None
+
+
+def load_run_predictions(run_id: str) -> pd.DataFrame:
+    """한 학습의 예측 전체. 컬럼: image_id, tag_key, prob."""
+    def fetch():
+        out, start = [], 0
+        while True:  # 페이지를 넘길 때 순서가 바뀌지 않도록 기본 키 순으로 정렬
+            page = (db.get_client().table("predictions").select("image_id, tag_key, prob").eq("run_id", run_id)
+                    .order("image_id").order("tag_key").range(start, start + db.PAGE_SIZE - 1).execute().data)
+            out += page
+            if len(page) < db.PAGE_SIZE:
+                return out
+            start += db.PAGE_SIZE
+    df = pd.DataFrame(_db_call(fetch), columns=["image_id", "tag_key", "prob"])
     return df.astype({"image_id": str, "tag_key": str, "prob": float})
 
 

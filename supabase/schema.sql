@@ -226,3 +226,70 @@ language sql stable security definer set search_path = public as $$
 $$;
 revoke all on function public.member_name(text) from public;
 grant execute on function public.member_name(text) to anon, authenticated, service_role;
+
+-- =====================================================================
+-- 학습 기록 + 예측을 학습 묶음(run) 단위로 (2026-10, 태그 학습을 로컬 PC의 training.py로만 하면서 추가)
+-- 이 블록만 따로 실행해도 되고, 여러 번 실행해도 안전하다.
+--
+-- - training.py가 학습 한 번마다 training_runs에 기록(누가, 언제, 이미지 수, 태그별 지표)을 넣고,
+--   예측을 그 run_id로 여러 번에 나눠 올린 뒤 finish_training_run()으로 '완료' 표시한다.
+-- - 웹앱은 가장 최근에 '완료'된 학습의 예측만 쓴다 → 올리는 도중이거나 실패한 학습은 팀 화면에 보이지 않는다.
+-- - 완료할 때 그보다 먼저 시작한 학습의 예측은 지운다(학습 기록·지표는 남김). 팀원 키에는 삭제 권한이 없어 함수로 한다.
+-- =====================================================================
+create table if not exists public.training_runs (
+  run_id       uuid primary key,
+  started_at   timestamptz not null default now(),
+  completed_at timestamptz,                          -- 비어 있으면 올리는 중이거나 중간에 실패한 학습
+  trainer      text not null check (length(trim(trainer)) > 0),
+  embed_model  text not null,
+  n_images     int not null default 0,               -- 학습에 쓴(임베딩이 있는) 이미지 수
+  n_rows       int not null default 0,               -- 올린 예측 행 수 (완료할 때 DB가 센다)
+  report       jsonb not null default '[]'::jsonb    -- 태그별 지표 [{tag_key, name, n_pos, n_neg, precision, recall, f1, ...}]
+);
+create index if not exists training_runs_completed_idx on public.training_runs (completed_at desc);
+
+-- 예측에 학습 묶음 번호를 붙인다. 기본 키를 (run_id, image_id, tag_key)로 바꾼다.
+-- 예전 방식 행(run_id 없음)은 새 방식에서 읽지 않으므로 지운다 (전환 시점 2026-10-22에 0행).
+alter table public.predictions add column if not exists run_id uuid references public.training_runs(run_id) on delete cascade;
+do $$
+begin
+  if not exists (select 1 from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
+                 where i.indrelid = 'public.predictions'::regclass and i.indisprimary and a.attname = 'run_id') then
+    delete from public.predictions where run_id is null;
+    alter table public.predictions drop constraint if exists predictions_pkey;
+    alter table public.predictions alter column run_id set not null;
+    alter table public.predictions add primary key (run_id, image_id, tag_key);
+  end if;
+end $$;
+
+create or replace function public.finish_training_run(p_run uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  v_started timestamptz;
+begin
+  update public.training_runs
+     set completed_at = now(), n_rows = (select count(*) from public.predictions where run_id = p_run)
+   where run_id = p_run and completed_at is null
+  returning started_at into v_started;
+  if v_started is null then
+    raise exception '학습 기록(%)이 없거나 이미 완료되었습니다', p_run;
+  end if;
+  -- 이 학습보다 먼저 시작한 학습(완료·중단 모두)의 예측은 지운다. 학습 기록과 지표는 남긴다
+  delete from public.predictions p using public.training_runs r
+   where p.run_id = r.run_id and r.run_id <> p_run and r.started_at <= v_started;
+end $$;
+
+grant select, insert, update, delete on public.training_runs to service_role;
+grant select, insert                 on public.training_runs to anon, authenticated;
+alter table public.training_runs enable row level security;
+do $$
+begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'training_runs' and policyname = 'training_runs_select') then
+    create policy training_runs_select on public.training_runs for select to anon, authenticated using (true);
+  end if;
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'training_runs' and policyname = 'training_runs_insert') then
+    create policy training_runs_insert on public.training_runs for insert to anon, authenticated with check (completed_at is null);
+  end if;
+end $$;
+revoke all on function public.finish_training_run(uuid) from public;
+grant execute on function public.finish_training_run(uuid) to anon, authenticated, service_role;

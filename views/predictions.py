@@ -15,7 +15,8 @@ df = load_metadata()
 preds = load_predictions()
 tags = [t for t in load_tags_or_stop() if t.key in set(preds["tag_key"])]
 if not tags:
-    st.info("아직 예측 결과가 없습니다. **학습 실행** 페이지에서 먼저 학습을 실행하세요.")
+    st.info("아직 예측 결과가 없습니다. 로컬 PC에서 `training.py`로 학습하면 여기에 나옵니다. 방법은 **학습 현황** 페이지에 있어요.")
+    st.page_link("views/train.py", label="학습 현황으로 이동", icon="🧠")
     st.stop()
 
 labeler = current_user()

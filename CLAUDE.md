@@ -13,13 +13,15 @@ python -m playwright install chromium    # 개발자용, 브라우저 E2E 테스
 streamlit run app.py
 ```
 
-- 단독 스크립트: `python training.py [--name 이름] [--no-share]`(자동 태깅 학습, 기본으로 예측을 DB에 공유), `python migrate_to_supabase.py`(로컬 데이터 → DB, secret 키 필요. 팀원은 `--evals-only`로 예전 `eval_*.csv` 평가만 올림), `python check_supabase.py`(DB 연결 테스트)
+- 태그 학습은 **로컬 PC에서만**: `python training.py --email 팀원이메일`(예측을 DB에 공유) / `--no-share`(이 PC에만). 웹앱 '학습 현황'은 결과·실행 방법만 보여주고 학습하지 않는다. 멈춰도 같은 명령으로 이어서 한다
+- 단독 스크립트: `python migrate_to_supabase.py`(로컬 데이터 → DB, secret 키 필요. 팀원은 `--evals-only`로 예전 `eval_*.csv` 평가만 올림), `python check_supabase.py`(DB 연결 테스트)
 - 포즈: `python predict_poses.py`(DWPose 미리 계산, 아직 없는 이미지만, 500장 약 25분), `python predict_poses.py --import x.json`(별도 환경 결과 가져오기), `python export_coco.py`(사람이 확정한 포즈 → COCO)
 - MediaPipe는 팀 환경에 넣지 않는다(numpy·OpenCV 충돌). 비교용은 `tools/mediapipe_predict.py` 상단 안내대로 별도 가상환경에서 실행
 - 테스트: `python -m pytest tests`
   - `tests/test_pose.py`: 매칭 단위 테스트 (DB·브라우저 불필요)
   - `tests/test_team.py`: 팀 현황 집계·비슷한 이름 감지 단위 테스트
   - `tests/test_auth.py`: 팀원 이메일 확인·방문자 쓰기 차단 (가짜 DB, 실제 DB 불필요)
+  - `tests/test_training_scale.py`: 대량 학습 대비 — 임베딩 이어서 하기·캐시 복구·깨진 이미지 건너뛰기, 예측 나눠 올리기·실패 시 완료 안 함 (가짜 DB·임베딩)
   - `tests/test_search_evals.py`: 유사 검색 평가 저장·읽기·예전 CSV 변환 (가짜 DB 클라이언트, 실제 DB 불필요)
   - `st.page_link`는 `st.navigation` 안에서만 동작한다. 페이지를 `AppTest.from_file`로 단독 실행해 볼 때는 `st.page_link`를 대체해 둔다
   - `tests/e2e/test_pin_editor.py`: 핀 편집기를 Chromium에서 직접 검증 (Streamlit·DB 불필요)
@@ -41,8 +43,9 @@ streamlit run app.py
 | `core/dataset.py` | `metadata.csv` + `images/` 로딩(`read_metadata`는 순수 함수, `load_metadata`는 캐시 버전), 썸네일, `local_image`, 배포 서버 여부 `ON_CLOUD` |
 | `core/evaluation.py` | 이미지 유사 검색 평가(비슷함/다름) DB 입출력(`search_evals`), 예전 `eval_*.csv` 변환 |
 | `core/db.py` | Supabase 클라이언트, `fetch_all`/`upsert`, `friendly_error`(한국어 오류) |
-| `core/tagging.py` | 팀 태그(`tags`)·라벨(`labels`) DB 입출력, 예측 CSV·DB 공유(`predictions`). `save_labels()`는 이미지 한 장의 여러 태그를 한 번의 요청으로 저장(전부 저장 또는 전부 실패) |
-| `methods/predicted_tags.py` | 예측 읽기 공통 입구 `load_predictions()`: DB 공유 예측(가장 최근 학습 실행, 1분 캐시) → 없으면 로컬 `predicted_tags.csv` |
+| `core/tagging.py` | 팀 태그(`tags`)·라벨(`labels`) DB 입출력, 예측 CSV, 팀 공유 예측(학습 묶음: `start_training_run` → `upload_predictions`(5,000행씩, 재시도) → `finish_training_run`). `save_labels()`는 이미지 한 장의 여러 태그를 한 번의 요청으로 저장(전부 저장 또는 전부 실패) |
+| `methods/predicted_tags.py` | 예측 읽기 공통 입구 `load_predictions()`: DB 공유 예측(가장 최근에 **완료된** 학습. 1분마다 새 학습 여부만 확인하고 바뀌면 전체를 다시 읽음) → 없으면 로컬 `predicted_tags.csv` |
+| `training.py` | 로컬 전용 학습. 임베딩 캐시는 30초마다·멈출 때·끝날 때 저장(임시 파일 후 교체, 읽을 때 두 파일의 앞쪽 공통 부분만 사용), 열 수 없는 이미지 건너뜀, 진행률에 속도·남은 시간 |
 | `core/image_labeling.py` | 이미지별 라벨링 규칙: 체크=1·해제=0·보류=저장 안 함, 끝낸 이미지 = 사용 중 태그 전부에 내 라벨이 있음 (순수 함수) |
 | `views/labeling.py` | 라벨링 방식 전환. `labeling_by_image.py`(기본, 체크박스 한 번에) / `labeling_by_tag.py`(기존 화면을 함수로 감싼 것 — 동작 변경 금지) |
 | `core/pose.py` | 포즈 관절 정의·정규화·매칭 (순수 numpy, Streamlit/DB 의존 없음) |
@@ -74,7 +77,7 @@ streamlit run app.py
 - Streamlit Cloud는 push한 파일을 받아도 서버를 재시작하지 않을 수 있다(예전 모듈이 메모리에 남아 ImportError). `app.py`의 `_reload_changed_code()`가 코드 파일 수정 시각이 바뀌면 프로젝트 모듈(`PROJECT_MODULES`)을 버리고 다시 불러온다. 새 최상위 패키지를 만들면 `PROJECT_MODULES`에 추가한다.
 - 서버(로컬 `metadata.csv` 없음)에서는 `img_path`가 이미지 URL이다. 파일로 열어야 하는 곳(PIL·OpenCV·CLIP)은 반드시 `core.dataset.local_image(img_path)`를 거친다(내려받아 `cache/remote/`에 캐시). `st.image`는 URL을 그대로 받으므로 필요 없다.
 - 배포 서버(`core.dataset.ON_CLOUD`, 코드가 `/mount/src/`에서 실행됨)는 메모리가 작다. 학습·AI 포즈 추정처럼 무거운 작업은 서버에서 버튼을 막고 `CLOUD_HEAVY_NOTICE`로 PC 실행을 안내한다. 새로 무거운 기능을 만들면 같은 방식으로 막는다. 시험할 때는 환경 변수 `DRAWING_REF_CLOUD=1`/`0`.
-- 방문자는 보기 전용이다. 화면은 저장 버튼을 `current_user()`가 비었을 때 꺼서 막고(`views.common.cannot_save_notice`로 안내), DB 쪽은 `db.upsert`가 `db.check_write()`로 한 번 더 막는다. `db.upsert`를 거치지 않고 직접 쓰는 코드(`client.table().insert/update/delete`)는 반드시 먼저 `db.check_write()`를 부른다. 이름과 무관한 쓰기 버튼(태그 관리, 학습 실행 등)은 `is_visitor()`로 끈다.
+- 방문자는 보기 전용이다. 화면은 저장 버튼을 `current_user()`가 비었을 때 꺼서 막고(`views.common.cannot_save_notice`로 안내), DB 쪽은 `db.upsert`가 `db.check_write()`로 한 번 더 막는다. `db.upsert`를 거치지 않고 직접 쓰는 코드(`client.table().insert/update/delete`)는 반드시 먼저 `db.check_write()`를 부른다. 이름과 무관한 쓰기 버튼(태그 관리, AI 미리 계산 등)은 `is_visitor()`로 끈다.
 - 서버의 파일(`drawing_ref_test/` 아래)은 재시작 때 지워진다. 팀이 만든 데이터는 파일이 아니라 DB에 저장한다(캐시만 파일로).
 - 좌표는 이미지 크기에 대한 0~1 비율로 저장하고, 각도 계산 전에는 반드시 가로세로 비율을 보정한다.
 - 포즈의 좌우는 **캐릭터 기준**(캐릭터의 왼팔 = `l_`). 화면에 안내 문구를 항상 표시한다.
@@ -84,8 +87,9 @@ streamlit run app.py
 - `SUPABASE.env`/`.env`의 키 값은 **절대 출력하지 않는다.** 키 종류 확인이 필요하면 접두사(`sb_secret_`/`sb_publishable_`)만 본다.
 - 태그를 새로 만들어야 하는 테스트는 key `zz_test_*` + 이름 `[테스트] ...`로 만들고, fixture에서 **시작 전·종료 시(실패해도)** 정리한다.
   임시 태그의 라벨을 먼저 지워야 태그가 지워진다(`labels.tag_key`는 외래키 restrict). 예: `tests/e2e/test_labeling_image_app.py`
-- `training.train_all()`은 기본으로 예측을 DB에 올리지 않는다(`publish=False`). 웹 '학습 실행'과 CLI만 `publish=True`. 테스트에서 켜면 팀 공유 예측을 덮어쓴다.
-  공유 예측은 지우지 않고(팀원 키는 삭제 권한 없음) 실행마다 같은 `predicted_at`을 붙여, 읽을 때 가장 최근 실행만 쓴다.
+- `training.train_all()`은 기본으로 예측을 DB에 올리지 않는다(`publish=False`). CLI만 `publish=True`. 테스트에서 실제 DB로 켜면 팀 공유 예측이 바뀐다.
+  예측은 학습 묶음(`training_runs.run_id`) 단위로 올리고, **다 올라간 뒤에만** `finish_training_run()`으로 완료 표시한다(완료할 때 그보다 먼저 시작한 학습의 예측은 DB 함수가 지움, 학습 기록·지표는 남음).
+  실제 DB로 올리기를 시험할 때는 trainer `__test__`로 묶음을 만들되 **완료하지 않고**, 끝나면 그 `training_runs` 행을 지운다(예측은 cascade로 함께 지워짐).
 - 학습을 실행하는 테스트는 `training`의 결과 경로(MODELS_DIR, REPORT_CSV, PRED_CSV, 임베딩 캐시)를 임시 폴더로 바꿔서 이 PC의 결과 파일을 덮어쓰지 않는다.
 - `poses`의 `source='model'` 행(annotator = 모델 이름: `dwpose`, `mediapipe-heavy`)은 모델 결과다. 사람 데이터와 섞어 지우지 말 것. 사람 라벨은 `manual`/`model_corrected`.
 - 테스트는 실제 팀 데이터를 건드리지 않는다. DB에 쓰는 테스트는 작성자/라벨러 이름 `__test__`를 쓰고 끝나면 그 행만 지운다.
@@ -96,7 +100,7 @@ streamlit run app.py
 
 ## DB (Supabase)
 
-- 테이블: `images`, `tags`, `labels`, `predictions`, `poses`, `pose_evals`, `search_evals`, `members`(팀원 명단 — 팀원 키로는 읽기 불가, 함수 `member_name`으로만 확인)
+- 테이블: `images`, `tags`, `labels`, `predictions`, `poses`, `pose_evals`, `search_evals`, `training_runs`(학습 기록·지표), `members`(팀원 명단 — 팀원 키로는 읽기 불가, 함수 `member_name`으로만 확인)
 - 스키마 변경 시 `supabase/schema.sql`에 추가하고, 사용자가 SQL Editor에서 실행해야 한다(API 키로는 DDL 불가).
 - 새 테이블에는 GRANT(이 프로젝트는 자동 부여 안 됨)와 RLS 정책을 함께 추가한다.
 
