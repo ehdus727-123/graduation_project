@@ -162,26 +162,38 @@ def fake_training_data(tmp_cache, monkeypatch):
     monkeypatch.setattr(training, "read_metadata", lambda: df)
     monkeypatch.setattr(training, "load_tags", lambda: tags)
     monkeypatch.setattr(training, "load_labels", lambda: labels)
-    monkeypatch.setattr(training, "known_image_ids", lambda: set(df["id"][:55]))
+    monkeypatch.setattr(training, "HEARTBEAT_EVERY", 0)  # 진행 상황을 매번 남긴다 (확인용)
     calls = []
     monkeypatch.setattr(training, "start_training_run",
-                        lambda trainer, model, n, report: calls.append(("start", trainer, n, report)) or "run-9")
-    monkeypatch.setattr(training, "finish_training_run", lambda run_id: calls.append(("finish", run_id)))
+                        lambda trainer, model: calls.append(("start", trainer)) or "run-9")
+    monkeypatch.setattr(training, "touch_training_run", lambda run_id, stage: calls.append(("touch", stage)))
+    monkeypatch.setattr(training, "finish_training_run",
+                        lambda run_id, n, report: calls.append(("finish", run_id, n, report)))
     return calls
 
 
-def test_publish_marks_complete_only_after_upload(fake_training_data, monkeypatch):
+def kinds(calls) -> list[str]:
+    """touch(진행 상황)는 여러 번이므로 연속된 것은 하나로 줄여 순서만 본다."""
+    out = []
+    for c in calls:
+        if not out or out[-1] != c[0]:
+            out.append(c[0])
+    return out
+
+
+def test_publish_records_at_start_and_completes_after_upload(fake_training_data, monkeypatch):
     calls = fake_training_data
     monkeypatch.setattr(training, "upload_predictions",
-                        lambda run_id, preds, model, known=None, progress=None:
-                        calls.append(("upload", run_id, len(preds[preds["image_id"].isin(known)]))) or 55)
+                        lambda run_id, preds, model, progress=None: calls.append(("upload", run_id, len(preds))) or 60)
     result = training.train_all(get_embedder=lambda: object(), progress=quiet, publish=True, trainer="김하영")
-    assert [c[0] for c in calls] == ["start", "upload", "finish"]
-    start = calls[0]
-    assert start[1] == "김하영" and start[2] == 60
-    assert start[3][0]["tag_key"] == "a" and isinstance(start[3][0]["f1"], float)  # DB(jsonb)로 보낼 수 있는 숫자
-    assert calls[1] == ("upload", "run-9", 55) and calls[2] == ("finish", "run-9")
-    assert result.shared_rows == 55 and not result.share_error
+    order = kinds(calls)
+    assert order[0] == "start" and order[-2:] == ["upload", "finish"]  # 시작할 때 기록 → … → 다 올린 뒤 완료
+    assert ("touch", "준비") in calls and any("임베딩 추출" in c[1] for c in calls if c[0] == "touch")  # 진행 상황 공유
+    assert calls[0] == ("start", "김하영")
+    finish = calls[-1]
+    assert finish[1] == "run-9" and finish[2] == 60
+    assert finish[3][0]["tag_key"] == "a" and isinstance(finish[3][0]["f1"], float)  # DB(jsonb)로 보낼 수 있는 숫자
+    assert result.shared_rows == 60 and not result.share_error
     assert training.PRED_CSV.exists()
 
 
@@ -193,9 +205,29 @@ def test_failed_upload_is_not_marked_complete(fake_training_data, monkeypatch):
 
     monkeypatch.setattr(training, "upload_predictions", broken)
     result = training.train_all(get_embedder=lambda: object(), progress=quiet, publish=True, trainer="김하영")
-    assert [c[0] for c in calls] == ["start"]  # finish를 부르지 않으므로 팀 화면은 직전 학습 그대로
+    assert "finish" not in kinds(calls)  # 완료하지 않으므로 팀 화면은 직전 학습 그대로
     assert "시간이 초과" in result.share_error and result.trained
     assert training.PRED_CSV.exists()  # 이 PC의 결과는 남는다
+
+
+def test_record_failure_keeps_training_locally(fake_training_data, monkeypatch):
+    calls = fake_training_data
+
+    def no_db(trainer, model):
+        raise db.DBError("DB 오류: 연결할 수 없습니다")
+
+    monkeypatch.setattr(training, "start_training_run", no_db)
+    monkeypatch.setattr(training, "upload_predictions", lambda *a, **k: pytest.fail("기록이 없으면 올리지 않는다"))
+    result = training.train_all(get_embedder=lambda: object(), progress=quiet, publish=True, trainer="김하영")
+    assert result.trained and "연결할 수 없습니다" in result.share_error and training.PRED_CSV.exists()
+    assert not calls  # 진행 상황도 남기지 않는다
+
+
+def test_no_record_when_nothing_to_train(fake_training_data, monkeypatch):
+    calls = fake_training_data
+    monkeypatch.setattr(training, "load_labels", lambda: pd.DataFrame(columns=["image_id", "tag_key", "value", "labeler", "timestamp"]))
+    result = training.train_all(get_embedder=lambda: object(), progress=quiet, publish=True, trainer="김하영")
+    assert not result.trained and not calls  # 라벨이 부족하면 '학습 중' 기록을 만들지 않는다
 
 
 def test_publish_requires_trainer(fake_training_data):

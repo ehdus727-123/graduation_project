@@ -18,13 +18,13 @@ from core.cli import quiet_streamlit, utf8_console
 quiet_streamlit()
 
 from core import db  # noqa: E402
-from core.dataset import CACHE_DIR, DATA_DIR, read_metadata  # noqa: E402
+from core.dataset import CACHE_DIR, DATA_DIR, read_local_metadata  # noqa: E402
 from core.evaluation import TABLE as EVAL_TABLE, csv_to_rows, load_evals_csv  # noqa: E402
 from core.tagging import LABELS_CSV, TAGS_YAML, invalidate_tags_cache, load_labels_csv  # noqa: E402
 
 
 def migrate_images() -> int:
-    df = read_metadata()
+    df = read_local_metadata()  # 이 PC의 metadata.csv (DB 목록이 아니라 올릴 원본)
     phash_csv = CACHE_DIR / "phash.csv"
     phash = dict(pd.read_csv(phash_csv, dtype=str).values) if phash_csv.exists() else {}
 

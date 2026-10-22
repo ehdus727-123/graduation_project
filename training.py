@@ -30,9 +30,9 @@ from core.cli import quiet_streamlit, utf8_console
 quiet_streamlit()
 
 from core.dataset import local_image, read_metadata  # noqa: E402
-from core.tagging import (EMB_IDS_CSV, EMB_NPY, MODELS_DIR, NEGATIVE, POSITIVE, PRED_CSV,  # noqa: E402
-                          REPORT_CSV, TagDef, consolidate, finish_training_run, known_image_ids, load_labels,
-                          load_tags, start_training_run, upload_predictions)
+from core.tagging import (EMB_IDS_CSV, EMB_NPY, HEARTBEAT_EVERY, MODELS_DIR, NEGATIVE, POSITIVE,  # noqa: E402
+                          PRED_CSV, REPORT_CSV, TagDef, consolidate, finish_training_run, load_labels, load_tags,
+                          start_training_run, touch_training_run, upload_predictions)
 
 # 임베딩 모델 설정. WD Tagger 등으로 바꿀 때는 이 상수와 load_embedder / embed_images만 고치면 된다.
 # EMBED_ID가 바뀌면 기존 임베딩 캐시는 자동으로 버리고 새로 추출한다.
@@ -256,10 +256,19 @@ def train_all(get_embedder: Callable = load_embedder, progress: Progress = _prin
     """
     t0 = time.perf_counter()
     log: list[str] = []
+    run_id: str | None = None  # 팀 공유 학습 기록 (시작할 때 만들어 진행 상황을 남긴다)
+    last_beat = 0.0
 
     def report_progress(stage, message, frac=None):
+        nonlocal last_beat
         log.append(f"[{stage}] {message}")
         progress(stage, message, frac)
+        if run_id and time.monotonic() - last_beat >= HEARTBEAT_EVERY:  # 다른 팀원 화면의 '학습 중' 표시
+            last_beat = time.monotonic()
+            try:
+                touch_training_run(run_id, f"{stage} · {message}")
+            except Exception:
+                pass  # 진행 상황 공유가 안 돼도 학습은 계속한다
 
     if publish and not trainer.strip():
         raise TrainingError("준비", None, ValueError("팀에 공유하려면 학습한 사람 이름이 필요합니다."))
@@ -267,14 +276,10 @@ def train_all(get_embedder: Callable = load_embedder, progress: Progress = _prin
         df = read_metadata()
         tags = load_tags()
         all_labels = consolidate(load_labels())
-        known = known_image_ids() if publish else None
     except Exception as e:
         raise TrainingError("준비", None, e) from e
     labels = all_labels[all_labels["image_id"].isin(set(df["id"]))]  # 다른 데이터셋에서 온 라벨은 무시
     report_progress("준비", f"이미지 {len(df):,}장 · 사용 중 태그 {len(tags)}개")
-    if known is not None and (unregistered := len(set(df["id"]) - known)):
-        report_progress("준비", f"⚠️ DB에 등록되지 않은 이미지 {unregistered:,}장 — 이 이미지들의 예측은 팀에 공유되지 않습니다 "
-                                "(관리자 PC에서 python migrate_to_supabase.py로 등록)")
 
     status = label_status(tags, labels)
     if not status["trainable"].any():
@@ -282,6 +287,16 @@ def train_all(get_embedder: Callable = load_embedder, progress: Progress = _prin
             report_progress("준비", f"{s['name']} 건너뜀 — {s['reason']}")
         report_progress("준비", "학습 가능한 태그가 없습니다 (라벨 부족)")
         return TrainResult(status=status, seconds=time.perf_counter() - t0, log=log)
+
+    share_error = ""
+    if publish:
+        try:
+            run_id = start_training_run(trainer, EMBED_ID)
+            touch_training_run(run_id, "준비")
+            last_beat = time.monotonic()
+        except Exception as e:  # 기록을 못 만들면 공유만 못 한다 (학습은 이 PC에서 계속)
+            share_error = f"학습 기록을 만들지 못했습니다: {e}"
+            report_progress("팀 공유", f"⚠️ {share_error} — 학습은 계속하고 결과는 이 PC에만 저장합니다")
 
     df, X, n_new, skipped = ensure_embeddings(df, get_embedder, report_progress)
     if skipped:
@@ -328,17 +343,18 @@ def train_all(get_embedder: Callable = load_embedder, progress: Progress = _prin
     all_preds = pd.concat(preds)
     all_preds.to_csv(PRED_CSV, index=False, encoding="utf-8-sig")
 
-    shared_rows, share_error = None, ""
-    if publish:
+    shared_rows = None
+    if publish and run_id:
         report_progress("팀 공유", f"예측 {len(all_preds):,}행을 DB에 올리는 중 (다 올라간 뒤에만 팀 화면에 보입니다)")
         try:
-            run_id = start_training_run(trainer, EMBED_ID, len(df), _report_rows(report))
             shared_rows = upload_predictions(
-                run_id, all_preds, EMBED_ID, known=known,
+                run_id, all_preds, EMBED_ID,
                 progress=lambda done, total: report_progress("팀 공유", f"{done:,}/{total:,}행", done / total if total else 1.0))
-            finish_training_run(run_id)
+            finish_training_run(run_id, len(df), _report_rows(report))
+            run_id = None  # 끝났으므로 진행 상황을 더 남기지 않는다
             report_progress("팀 공유", f"{shared_rows:,}행 공유 완료 — 팀원 화면에 1분 안에 반영됩니다", 1.0)
         except Exception as e:  # 공유 실패는 학습 실패가 아니다 (로컬 결과는 이미 저장됨, 팀 화면은 직전 학습 그대로)
+            run_id = None
             share_error = str(e)
             report_progress("팀 공유", f"실패 (이 PC의 결과 파일은 저장됨, 팀 화면은 직전 학습 결과 그대로): {e}")
 
@@ -419,7 +435,9 @@ def main() -> int:
         print(r.to_string(index=False, float_format="%.2f"))
         if result.share_error:
             print(f"\n팀 공유 실패 (이 PC의 결과 파일은 저장됨): {result.share_error}", file=sys.stderr)
-    return 0
+            return 3
+        return 0
+    return 2  # 학습 가능한 태그가 없어 학습하지 않음
 
 
 if __name__ == "__main__":

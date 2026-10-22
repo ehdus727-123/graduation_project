@@ -22,7 +22,7 @@ from PIL import Image  # noqa: E402
 from core import db  # noqa: E402
 from core import pose as P  # noqa: E402
 from core import poses as store  # noqa: E402
-from core.dataset import DATA_DIR, read_metadata  # noqa: E402
+from core.dataset import DATA_DIR, local_image, read_metadata  # noqa: E402
 
 VISIBILITY = {P.VISIBLE: 2, P.OCCLUDED: 1, P.ABSENT: 0}
 
@@ -36,7 +36,7 @@ def build(poses, meta) -> dict:
     for n, r in enumerate(df.itertuples(), start=1):
         if r.image_id not in paths:
             continue
-        with Image.open(paths[r.image_id]) as img:
+        with Image.open(local_image(paths[r.image_id])) as img:  # 이 PC에 파일이 없으면 원본 주소에서 내려받는다
             w, h = img.size
         kps = P.validate_keypoints(r.keypoints)
         flat, xs, ys = [], [], []

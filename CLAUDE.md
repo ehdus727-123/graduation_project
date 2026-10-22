@@ -13,7 +13,10 @@ python -m playwright install chromium    # 개발자용, 브라우저 E2E 테스
 streamlit run app.py
 ```
 
-- 태그 학습은 **로컬 PC에서만**: `python training.py --email 팀원이메일`(예측을 DB에 공유) / `--no-share`(이 PC에만). 웹앱 '학습 현황'은 결과·실행 방법만 보여주고 학습하지 않는다. 멈춰도 같은 명령으로 이어서 한다
+- 비개발자용 실행: `SPECTRUM 실행.bat` 더블클릭(= `python -m streamlit run app.py`). bat은 **UTF-8 + CRLF**(`.gitattributes`의 `*.bat eol=crlf`)이고 첫 줄 근처에서 `chcp 65001`
+- 태그 학습은 **팀원 누구나 자기 PC에서 켠 웹앱**의 '학습 현황 → 학습 시작'으로 한다(배포 서버 `ON_CLOUD`에서는 버튼 없음). 학습은 `core/train_job.py`가 화면과 분리된 스레드로 돌린다(서버 프로세스에 하나, `st.cache_resource`) → 다른 페이지로 가거나 새로고침해도 계속, 한 번에 하나만. 학습 기록(`training_runs`)은 시작할 때 만들고 `touch_training_run`으로 20초마다 진행 상황을 남겨, 다른 팀원 화면에 '○○ 님이 학습 중'이 보인다(`active_training_runs`, 2분 안에 소식이 있는 미완료 기록)
+  - 개발자용 CLI: `python training.py --email 팀원이메일`(DB 공유) / `--no-share`(이 PC에만). 종료 코드 0 완료·1 실패·2 학습할 태그 없음·3 팀 공유 실패·130 Ctrl+C
+  - 뒤에서 도는 학습 스레드에는 화면 세션이 없으므로 방문자 차단(`auth.write_guard`)은 세션이 없는 스레드를 통과시킨다. 그런 스레드는 팀원 확인 뒤에만 만든다
 - 단독 스크립트: `python migrate_to_supabase.py`(로컬 데이터 → DB, secret 키 필요. 팀원은 `--evals-only`로 예전 `eval_*.csv` 평가만 올림), `python check_supabase.py`(DB 연결 테스트)
 - 포즈: `python predict_poses.py`(DWPose 미리 계산, 아직 없는 이미지만, 500장 약 25분), `python predict_poses.py --import x.json`(별도 환경 결과 가져오기), `python export_coco.py`(사람이 확정한 포즈 → COCO)
 - MediaPipe는 팀 환경에 넣지 않는다(numpy·OpenCV 충돌). 비교용은 `tools/mediapipe_predict.py` 상단 안내대로 별도 가상환경에서 실행
@@ -21,6 +24,7 @@ streamlit run app.py
   - `tests/test_pose.py`: 매칭 단위 테스트 (DB·브라우저 불필요)
   - `tests/test_team.py`: 팀 현황 집계·비슷한 이름 감지 단위 테스트
   - `tests/test_auth.py`: 팀원 이메일 확인·방문자 쓰기 차단 (가짜 DB, 실제 DB 불필요)
+  - `tests/test_train_job.py`: 뒤에서 도는 학습 작업 — 한 번에 하나, 진행·성공·실패 기록, 방문자 차단이 학습 스레드를 막지 않음
   - `tests/test_training_scale.py`: 대량 학습 대비 — 임베딩 이어서 하기·캐시 복구·깨진 이미지 건너뛰기, 예측 나눠 올리기·실패 시 완료 안 함 (가짜 DB·임베딩)
   - `tests/test_search_evals.py`: 유사 검색 평가 저장·읽기·예전 CSV 변환 (가짜 DB 클라이언트, 실제 DB 불필요)
   - `st.page_link`는 `st.navigation` 안에서만 동작한다. 페이지를 `AppTest.from_file`로 단독 실행해 볼 때는 `st.page_link`를 대체해 둔다
@@ -40,12 +44,13 @@ streamlit run app.py
 | `core/team.py` | 팀 활동 집계(팀원별 작업량, 비슷한 이름 감지, 마지막 학습 이후 라벨 수) — 순수 pandas. `views/team.py`(팀 현황)가 쓴다 |
 | `views/` | 페이지 스크립트. 공통 UI는 `views/common.py` |
 | `methods/` | 검색 방식 모듈. `SearchMethod` + 기능 믹스인(`ImageSearch`/`PairFinder`/`TagSource`), `METHOD_CLASSES`에 등록하면 해당 페이지에 자동 노출 |
-| `core/dataset.py` | `metadata.csv` + `images/` 로딩(`read_metadata`는 순수 함수, `load_metadata`는 캐시 버전), 썸네일, `local_image`, 배포 서버 여부 `ON_CLOUD` |
+| `core/dataset.py` | 이미지 목록. `read_metadata`는 **항상 DB(`images`) 기준**(id로 정렬)이고 이 PC에 `images/{id}.jpg`가 있으면 그 파일, 없으면 URL을 `img_path`로 쓴다. DB 접속 정보가 없을 때만 로컬 `metadata.csv`. `read_local_metadata`는 이 PC의 `metadata.csv`(DB 등록용). `load_metadata`는 5분 캐시. 썸네일, `local_image`, 배포 서버 여부 `ON_CLOUD` |
 | `core/evaluation.py` | 이미지 유사 검색 평가(비슷함/다름) DB 입출력(`search_evals`), 예전 `eval_*.csv` 변환 |
 | `core/db.py` | Supabase 클라이언트, `fetch_all`/`upsert`, `friendly_error`(한국어 오류) |
 | `core/tagging.py` | 팀 태그(`tags`)·라벨(`labels`) DB 입출력, 예측 CSV, 팀 공유 예측(학습 묶음: `start_training_run` → `upload_predictions`(5,000행씩, 재시도) → `finish_training_run`). `save_labels()`는 이미지 한 장의 여러 태그를 한 번의 요청으로 저장(전부 저장 또는 전부 실패) |
 | `methods/predicted_tags.py` | 예측 읽기 공통 입구 `load_predictions()`: DB 공유 예측(가장 최근에 **완료된** 학습. 1분마다 새 학습 여부만 확인하고 바뀌면 전체를 다시 읽음) → 없으면 로컬 `predicted_tags.csv` |
-| `training.py` | 로컬 전용 학습. 임베딩 캐시는 30초마다·멈출 때·끝날 때 저장(임시 파일 후 교체, 읽을 때 두 파일의 앞쪽 공통 부분만 사용), 열 수 없는 이미지 건너뜀, 진행률에 속도·남은 시간 |
+| `core/train_job.py` | 로컬 웹앱 '학습 시작'을 뒤에서 돌리는 작업 관리자(스레드, 한 번에 하나, 진행 상태·결과 보관). Streamlit 의존 없음 |
+| `training.py` | 학습 본체(웹앱 버튼·CLI 공용). 임베딩 캐시는 30초마다·멈출 때·끝날 때 저장(임시 파일 후 교체, 읽을 때 두 파일의 앞쪽 공통 부분만 사용), 열 수 없는 이미지 건너뜀, 진행률에 속도·남은 시간 |
 | `core/image_labeling.py` | 이미지별 라벨링 규칙: 체크=1·해제=0·보류=저장 안 함, 끝낸 이미지 = 사용 중 태그 전부에 내 라벨이 있음 (순수 함수) |
 | `views/labeling.py` | 라벨링 방식 전환. `labeling_by_image.py`(기본, 체크박스 한 번에) / `labeling_by_tag.py`(기존 화면을 함수로 감싼 것 — 동작 변경 금지) |
 | `core/pose.py` | 포즈 관절 정의·정규화·매칭 (순수 numpy, Streamlit/DB 의존 없음) |
@@ -67,7 +72,7 @@ streamlit run app.py
 - **화면 문구는 모두 한국어.** 오류도 팀원이 이해할 수 있는 한국어로(`db.friendly_error` 참고).
 - CSV는 `utf-8-sig`로 쓰고 읽는다(엑셀 한글 깨짐 방지).
 - 페이지 간 공유 상태는 `st.session_state`, 위젯 키 이름은 페이지 접두사를 붙인다(`label_`, `pose_` 등).
-- `st.cache_resource`/`st.cache_data` 함수의 인자 이름을 `_`로 시작하면 캐시 키에서 빠진다. 모듈 리로드 대비는 `methods/__init__.py`의 클래스 id 키 참고.
+- `st.cache_resource`/`st.cache_data` 함수의 인자 이름을 `_`로 시작하면 캐시 키에서 빠진다. 모듈 리로드 대비는 `methods/__init__.py`의 클래스 id 키 참고. 행 번호에 묶인 캐시(검색 인덱스 등)는 `metadata_key(df)`를 키에 넣어 이미지 목록이 바뀌면 다시 만든다.
 - 무거운 계산 결과(Phash, 임베딩)는 `drawing_ref_test/cache/` 등에 파일로 캐시한다.
 - `st.components.v2` 컴포넌트 키에는 `__`를 쓸 수 없다. 작성자 이름처럼 임의 문자가 들어가는 키는 해시로 바꾼다(`components/pose_editor.py`).
 - 위젯 키에 대상 ID와 '저장 상태 요약값'을 넣어, 대상이 바뀌거나 저장 직후 다시 열 때 위젯이 새로 초기화되게 한다(라벨링 체크박스, 포즈 편집기 공통).
@@ -88,7 +93,7 @@ streamlit run app.py
 - 태그를 새로 만들어야 하는 테스트는 key `zz_test_*` + 이름 `[테스트] ...`로 만들고, fixture에서 **시작 전·종료 시(실패해도)** 정리한다.
   임시 태그의 라벨을 먼저 지워야 태그가 지워진다(`labels.tag_key`는 외래키 restrict). 예: `tests/e2e/test_labeling_image_app.py`
 - `training.train_all()`은 기본으로 예측을 DB에 올리지 않는다(`publish=False`). CLI만 `publish=True`. 테스트에서 실제 DB로 켜면 팀 공유 예측이 바뀐다.
-  예측은 학습 묶음(`training_runs.run_id`) 단위로 올리고, **다 올라간 뒤에만** `finish_training_run()`으로 완료 표시한다(완료할 때 그보다 먼저 시작한 학습의 예측은 DB 함수가 지움, 학습 기록·지표는 남음).
+  예측은 학습 묶음(`training_runs.run_id`) 단위로 올리고, **다 올라간 뒤에만** `finish_training_run()`으로 완료 표시한다(완료할 때 다른 학습 중 이미 완료된 것과 30분 넘게 멈춘 것의 예측은 DB 함수가 지움 — 같은 시간에 올리는 중인 학습은 남김, 학습 기록·지표는 남음).
   실제 DB로 올리기를 시험할 때는 trainer `__test__`로 묶음을 만들되 **완료하지 않고**, 끝나면 그 `training_runs` 행을 지운다(예측은 cascade로 함께 지워짐).
 - 학습을 실행하는 테스트는 `training`의 결과 경로(MODELS_DIR, REPORT_CSV, PRED_CSV, 임베딩 캐시)를 임시 폴더로 바꿔서 이 PC의 결과 파일을 덮어쓰지 않는다.
 - `poses`의 `source='model'` 행(annotator = 모델 이름: `dwpose`, `mediapipe-heavy`)은 모델 결과다. 사람 데이터와 섞어 지우지 말 것. 사람 라벨은 `manual`/`model_corrected`.

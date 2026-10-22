@@ -232,9 +232,11 @@ grant execute on function public.member_name(text) to anon, authenticated, servi
 -- 이 블록만 따로 실행해도 되고, 여러 번 실행해도 안전하다.
 --
 -- - training.py가 학습 한 번마다 training_runs에 기록(누가, 언제, 이미지 수, 태그별 지표)을 넣고,
---   예측을 그 run_id로 여러 번에 나눠 올린 뒤 finish_training_run()으로 '완료' 표시한다.
+--   (학습을 시작할 때 기록을 만들고) 예측을 그 run_id로 여러 번에 나눠 올린 뒤 finish_training_run()으로 '완료' 표시한다.
 -- - 웹앱은 가장 최근에 '완료'된 학습의 예측만 쓴다 → 올리는 도중이거나 실패한 학습은 팀 화면에 보이지 않는다.
--- - 완료할 때 그보다 먼저 시작한 학습의 예측은 지운다(학습 기록·지표는 남김). 팀원 키에는 삭제 권한이 없어 함수로 한다.
+-- - 완료할 때 다른 학습(이미 완료됐거나 30분 넘게 멈춘 것)의 예측은 지운다(학습 기록·지표는 남김). 팀원 키에는 삭제 권한이 없어 함수로 한다.
+-- - 학습 중인 PC는 touch_training_run()으로 진행 상황을 남겨, 다른 팀원 화면에 '○○ 님이 학습 중'이 보인다.
+-- - 2026-10-22에 처음 실행한 뒤 바뀐 부분(진행 상황 칸, 함수 인자)이 있으므로 이 블록 전체를 다시 실행하면 된다.
 -- =====================================================================
 create table if not exists public.training_runs (
   run_id       uuid primary key,
@@ -244,8 +246,13 @@ create table if not exists public.training_runs (
   embed_model  text not null,
   n_images     int not null default 0,               -- 학습에 쓴(임베딩이 있는) 이미지 수
   n_rows       int not null default 0,               -- 올린 예측 행 수 (완료할 때 DB가 센다)
-  report       jsonb not null default '[]'::jsonb    -- 태그별 지표 [{tag_key, name, n_pos, n_neg, precision, recall, f1, ...}]
+  report       jsonb not null default '[]'::jsonb,   -- 태그별 지표 [{tag_key, name, n_pos, n_neg, precision, recall, f1, ...}]
+  heartbeat_at timestamptz,                          -- 학습 중인 PC가 주기적으로 갱신 → 다른 팀원 화면에 '학습 중' 표시
+  stage        text                                  -- 지금 하는 일 (예: '임베딩 추출 · 45% 남은 시간 약 3분')
 );
+-- 2026-10-22 처음 만든 뒤 추가한 칸 (이미 테이블이 있으면 여기서 더한다)
+alter table public.training_runs add column if not exists heartbeat_at timestamptz;
+alter table public.training_runs add column if not exists stage text;
 create index if not exists training_runs_completed_idx on public.training_runs (completed_at desc);
 
 -- 예측에 학습 묶음 번호를 붙인다. 기본 키를 (run_id, image_id, tag_key)로 바꾼다.
@@ -262,22 +269,32 @@ begin
   end if;
 end $$;
 
-create or replace function public.finish_training_run(p_run uuid) returns void
+-- 학습 기록은 학습을 시작할 때 만들고(지표 없이), 끝날 때 이 함수로 이미지 수·지표를 넣으며 '완료' 표시한다.
+drop function if exists public.finish_training_run(uuid);  -- 2026-10-22 첫 버전 (인자 하나)
+create or replace function public.finish_training_run(p_run uuid, p_n_images int, p_report jsonb) returns void
 language plpgsql security definer set search_path = public as $$
-declare
-  v_started timestamptz;
 begin
   update public.training_runs
-     set completed_at = now(), n_rows = (select count(*) from public.predictions where run_id = p_run)
-   where run_id = p_run and completed_at is null
-  returning started_at into v_started;
-  if v_started is null then
+     set completed_at = now(), heartbeat_at = now(), stage = '완료',
+         n_images = p_n_images, report = coalesce(p_report, '[]'::jsonb),
+         n_rows = (select count(*) from public.predictions where run_id = p_run)
+   where run_id = p_run and completed_at is null;
+  if not found then
     raise exception '학습 기록(%)이 없거나 이미 완료되었습니다', p_run;
   end if;
-  -- 이 학습보다 먼저 시작한 학습(완료·중단 모두)의 예측은 지운다. 학습 기록과 지표는 남긴다
+  -- 다른 학습의 예측은 지운다: 이미 완료된 학습(이제 옛 결과)과 30분 넘게 소식이 없는 중단된 학습.
+  -- 같은 시간에 다른 PC에서 아직 올리는 중인 학습의 예측은 남긴다. 학습 기록과 지표는 모두 남긴다
   delete from public.predictions p using public.training_runs r
-   where p.run_id = r.run_id and r.run_id <> p_run and r.started_at <= v_started;
+   where p.run_id = r.run_id and r.run_id <> p_run
+     and (r.completed_at is not null or coalesce(r.heartbeat_at, r.started_at) < now() - interval '30 minutes');
 end $$;
+
+-- 학습 중인 PC가 주기적으로 부른다 → 다른 팀원 화면에 '○○ 님이 학습 중 · 지금 하는 일'을 보여준다
+create or replace function public.touch_training_run(p_run uuid, p_stage text) returns void
+language sql security definer set search_path = public as $$
+  update public.training_runs set heartbeat_at = now(), stage = left(p_stage, 300)
+   where run_id = p_run and completed_at is null
+$$;
 
 grant select, insert, update, delete on public.training_runs to service_role;
 grant select, insert                 on public.training_runs to anon, authenticated;
@@ -291,5 +308,7 @@ begin
     create policy training_runs_insert on public.training_runs for insert to anon, authenticated with check (completed_at is null);
   end if;
 end $$;
-revoke all on function public.finish_training_run(uuid) from public;
-grant execute on function public.finish_training_run(uuid) to anon, authenticated, service_role;
+revoke all on function public.finish_training_run(uuid, int, jsonb) from public;
+grant execute on function public.finish_training_run(uuid, int, jsonb) to anon, authenticated, service_role;
+revoke all on function public.touch_training_run(uuid, text) from public;
+grant execute on function public.touch_training_run(uuid, text) to anon, authenticated, service_role;

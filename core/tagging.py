@@ -5,7 +5,7 @@
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -200,17 +200,35 @@ def known_image_ids() -> set[str]:
     return {str(r["id"]) for r in _db_call(db.fetch_all, "images", "id")}
 
 
-def start_training_run(trainer: str, embed_model: str, n_images: int, report: list[dict]) -> str:
-    """학습 기록을 '올리는 중' 상태로 만들고 run_id를 돌려준다."""
+ACTIVE_SECONDS = 120  # 이 시간 안에 진행 상황을 남긴 미완료 학습 = 지금 학습 중 (학습 PC는 HEARTBEAT_EVERY마다 남김)
+HEARTBEAT_EVERY = 20
+
+
+def start_training_run(trainer: str, embed_model: str) -> str:
+    """학습을 시작할 때 기록을 '진행 중'으로 만들고 run_id를 돌려준다. 다른 팀원 화면에 '학습 중'으로 보인다."""
     import uuid
     if not trainer.strip():
         raise TagError("학습한 사람 이름이 비어 있습니다.")
     db.check_write()
     run_id = str(uuid.uuid4())
-    row = {"run_id": run_id, "trainer": trainer.strip(), "embed_model": embed_model, "n_images": int(n_images),
-           "report": report}
+    row = {"run_id": run_id, "trainer": trainer.strip(), "embed_model": embed_model,
+           "heartbeat_at": _now(), "stage": "준비"}
     _db_call(lambda: db.get_client().table("training_runs").insert(row, returning="minimal").execute())
     return run_id
+
+
+def touch_training_run(run_id: str, stage: str) -> None:
+    """진행 상황을 남긴다 (다른 팀원 화면의 '학습 중' 표시용)."""
+    db.check_write()
+    _db_call(lambda: db.get_client().rpc("touch_training_run", {"p_run": run_id, "p_stage": stage[:300]}).execute())
+
+
+def active_training_runs() -> list[dict]:
+    """지금 학습 중인 기록 (완료 전이고 ACTIVE_SECONDS 안에 진행 상황을 남긴 것). 최근 순."""
+    since = (datetime.now(timezone.utc) - timedelta(seconds=ACTIVE_SECONDS)).isoformat()
+    return _db_call(lambda: db.get_client().table("training_runs").select("run_id, trainer, started_at, heartbeat_at, stage")
+                    .is_("completed_at", "null").gte("heartbeat_at", since)
+                    .order("heartbeat_at", desc=True).execute().data)
 
 
 def upload_predictions(run_id: str, preds: pd.DataFrame, model: str, known: set[str] | None = None,
@@ -241,10 +259,14 @@ def upload_predictions(run_id: str, preds: pd.DataFrame, model: str, known: set[
     return total
 
 
-def finish_training_run(run_id: str) -> None:
-    """다 올라간 학습을 '완료'로 표시한다. 이때부터 팀 화면에 보이고, 그보다 먼저 시작한 학습의 예측은 지워진다."""
+def finish_training_run(run_id: str, n_images: int, report: list[dict]) -> None:
+    """다 올라간 학습을 '완료'로 표시하고 이미지 수·태그별 지표를 남긴다. 이때부터 팀 화면에 보인다.
+
+    다른 학습 중 이미 완료된 것(옛 결과)과 30분 넘게 멈춘 것의 예측은 DB 함수가 지운다 (같은 시간에 올리는 중인 학습은 남김).
+    """
     db.check_write()
-    _db_call(lambda: db.get_client().rpc("finish_training_run", {"p_run": run_id}).execute())
+    _db_call(lambda: db.get_client().rpc("finish_training_run",
+                                         {"p_run": run_id, "p_n_images": int(n_images), "p_report": report}).execute())
 
 
 def latest_training_run() -> dict | None:

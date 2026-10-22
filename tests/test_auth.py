@@ -72,7 +72,7 @@ def test_no_guard_outside_web_app():
 
 
 def test_sidebar_shows_names_as_typed():
-    from views.auth import _md
+    from views.auth import md_escape as _md
     assert _md("__test__") == r"\_\_test\_\_"   # 마크다운 굵은 글씨 기호로 사라지지 않게
     assert _md(r"a\b.c") == r"a\\b\.c"
     assert _md("김하영") == "김하영"

@@ -60,9 +60,23 @@ def _local_path(image_id: str, csv_path) -> Path:
 
 
 def read_metadata() -> pd.DataFrame:
-    """행 번호(0..n-1)가 모든 검색 모듈에서 공통 인덱스로 쓰인다. 웹앱에서는 load_metadata()를 쓴다."""
-    if not META_CSV.exists():  # 배포 서버: 로컬 데이터가 없으므로 Supabase에서 읽는다
-        return _read_metadata_from_db()
+    """팀 공통 이미지 목록. 행 번호(0..n-1)가 모든 검색 모듈에서 공통 인덱스로 쓰인다. 웹앱에서는 load_metadata()를 쓴다.
+
+    DB(images)가 기준이다 → 어느 PC에서든(예전 drawing_ref_test를 복사해 둔 PC도) 같은 이미지 목록을 본다.
+    이 PC에 이미지 파일(images/{id}.jpg)이 있으면 그 파일을, 없으면 원본 주소(URL)를 img_path로 쓴다.
+    DB 접속 정보가 없을 때만(오프라인 개발) 로컬 metadata.csv를 쓴다.
+    """
+    from core import db  # db.py가 dataset.ROOT를 import하므로 순환 import를 피하려고 함수 안에서 import
+    if not db.is_configured():
+        return read_local_metadata()
+    df = _read_metadata_from_db()
+    local = [IMG_DIR / f"{i}.jpg" for i in df["id"]]
+    df["img_path"] = [str(p) if p.exists() else url for p, url in zip(local, df["url"])]
+    return df
+
+
+def read_local_metadata() -> pd.DataFrame:
+    """이 PC의 metadata.csv + images/ (이미지 파일이 있는 행만). DB 등록(migrate_to_supabase.py)과 오프라인 개발용."""
     df = pd.read_csv(META_CSV, dtype={"id": str})
     df = df.drop_duplicates(subset="id")
     df["tags"] = df["tags"].fillna("")
@@ -76,16 +90,24 @@ def _read_metadata_from_db() -> pd.DataFrame:
     from core import db  # db.py가 dataset.ROOT를 import하므로 순환 import를 피하려고 함수 안에서 import
 
     rows = db.call(db.fetch_all, "images", "id,url,source_page,tags,width,height,phash")
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows, columns=["id", "url", "source_page", "tags", "width", "height", "phash"])
     df["id"] = df["id"].astype(str)
-    df = df.drop_duplicates(subset="id").reset_index(drop=True)
+    # DB는 순서를 보장하지 않으므로 id로 정렬한다 (행 번호가 공통 인덱스라 실행마다·PC마다 같아야 한다)
+    df = df.drop_duplicates(subset="id")
+    df = df.iloc[sorted(range(len(df)), key=lambda n: (len(df["id"].iat[n]), df["id"].iat[n]))].reset_index(drop=True)
     df["tag_list"] = df["tags"].map(lambda t: list(t) if isinstance(t, list) else str(t or "").split())
     df["tags"] = df["tag_list"].map(" ".join)
-    df["img_path"] = df["url"]  # 서버에서는 파일 경로 대신 이미지 URL을 쓴다
+    df["img_path"] = df["url"]
     return df
 
 
-load_metadata = st.cache_data(show_spinner="메타데이터 불러오는 중...")(read_metadata)
+METADATA_TTL = 300  # 다른 팀원이 DB에 등록한 새 이미지는 최대 5분 뒤에 보인다 (앱을 다시 켜지 않아도)
+load_metadata = st.cache_data(show_spinner="이미지 목록 불러오는 중...", ttl=METADATA_TTL)(read_metadata)
+
+
+def metadata_key(df: pd.DataFrame) -> tuple:
+    """이미지 목록이 바뀌었는지 비교하는 값 (검색 인덱스 등 행 번호에 묶인 캐시의 키)."""
+    return len(df), hash(tuple(df["id"]))
 
 
 def thumbnail(img_path: str) -> str:

@@ -27,7 +27,7 @@ div.spectrum-sub { text-align: center; opacity: 0.65; margin: 0.6rem 0 2rem; }
 """
 
 
-def _md(text: str) -> str:
+def md_escape(text: str) -> str:
     """이름·이메일을 마크다운 그대로 보이게 (예: '__test__'가 굵은 글씨 기호로 사라지지 않게)."""
     return "".join("\\" + ch if ch in "\\`*_{}[]()#+-.!<>|~$" else ch for ch in text)
 
@@ -41,7 +41,14 @@ def is_member() -> bool:
 
 
 def write_guard() -> None:
-    """core.db.set_write_guard에 넣는 함수. 팀원으로 입장한 세션만 DB에 쓸 수 있다."""
+    """core.db.set_write_guard에 넣는 함수. 팀원으로 입장한 세션만 DB에 쓸 수 있다.
+
+    화면 세션이 없는 스레드(팀원이 '학습 시작'을 눌러 뒤에서 도는 학습, core.train_job)는 막지 않는다.
+    그런 스레드는 팀원 확인을 거친 뒤에만 만들어진다.
+    """
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    if get_script_run_ctx() is None:
+        return
     if not is_member():
         raise DBError(VISITOR_BLOCKED)
 
@@ -108,8 +115,8 @@ def sidebar() -> None:
     """사이드바 맨 위: 누구로 입장했는지 + 로그아웃."""
     if is_member():
         st.session_state["evaluator"] = st.session_state[NAME]  # 저장할 때 쓰는 이름은 명단의 이름으로 고정
-        st.markdown(f"**{_md(st.session_state[NAME])}** 님")
-        st.caption(_md(st.session_state[EMAIL]))
+        st.markdown(f"**{md_escape(st.session_state[NAME])}** 님")
+        st.caption(md_escape(st.session_state[EMAIL]))
         st.button("로그아웃", key="auth_logout", on_click=_leave)
     else:
         st.session_state["evaluator"] = ""

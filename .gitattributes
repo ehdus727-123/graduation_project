@@ -1,3 +1,6 @@
 # 외부에서 가져온 원본 파일은 줄바꿈을 바꾸지 않는다 (third_party/three/README.md의 해시와 일치하게)
 static/vendor/** -text
 third_party/** -text
+
+# Windows 배치 파일은 CRLF로 유지 (LF만 있으면 cmd가 오동작할 수 있다)
+*.bat text eol=crlf
