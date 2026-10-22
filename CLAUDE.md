@@ -17,7 +17,7 @@ streamlit run app.py
 - 태그 학습은 **팀원 누구나 자기 PC에서 켠 웹앱**의 '학습 현황 → 학습 시작'으로 한다(배포 서버 `ON_CLOUD`에서는 버튼 없음). 학습은 `core/train_job.py`가 화면과 분리된 스레드로 돌린다(서버 프로세스에 하나, `st.cache_resource`) → 다른 페이지로 가거나 새로고침해도 계속, 한 번에 하나만. 학습 기록(`training_runs`)은 시작할 때 만들고 `touch_training_run`으로 20초마다 진행 상황을 남겨, 다른 팀원 화면에 '○○ 님이 학습 중'이 보인다(`active_training_runs`, 2분 안에 소식이 있는 미완료 기록)
   - 개발자용 CLI: `python training.py --email 팀원이메일`(DB 공유) / `--no-share`(이 PC에만). 종료 코드 0 완료·1 실패·2 학습할 태그 없음·3 팀 공유 실패·130 Ctrl+C
   - 뒤에서 도는 학습 스레드에는 화면 세션이 없으므로 방문자 차단(`auth.write_guard`)은 세션이 없는 스레드를 통과시킨다. 그런 스레드는 팀원 확인 뒤에만 만든다
-- 단독 스크립트: `python migrate_to_supabase.py`(로컬 데이터 → DB, secret 키 필요. 팀원은 `--evals-only`로 예전 `eval_*.csv` 평가만 올림), `python check_supabase.py`(DB 연결 테스트)
+- 단독 스크립트: `python migrate_to_supabase.py --images-only`(새로 수집한 이미지 중 DB에 없는 것만 추가 — 평소에는 이것, 팀원 키로도 가능: `images`는 팀원 키에 추가만 허용) / 인자 없이 실행하면 전체(처음 이전용. `tags.yaml`은 DB에 태그가 하나도 없을 때만 올림 — 팀이 지운 태그가 되살아나지 않게) / `--evals-only`(예전 `eval_*.csv` 평가만, 팀원 키로도 가능), `python check_supabase.py`(DB 연결 테스트)
 - 포즈: `python predict_poses.py`(DWPose 미리 계산, 아직 없는 이미지만, 500장 약 25분), `python predict_poses.py --import x.json`(별도 환경 결과 가져오기), `python export_coco.py`(사람이 확정한 포즈 → COCO)
 - MediaPipe는 팀 환경에 넣지 않는다(numpy·OpenCV 충돌). 비교용은 `tools/mediapipe_predict.py` 상단 안내대로 별도 가상환경에서 실행
 - 테스트: `python -m pytest tests`

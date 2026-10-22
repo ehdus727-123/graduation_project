@@ -1,17 +1,21 @@
 """로컬 데이터(metadata.csv, tags.yaml, labels.csv, eval_*.csv)를 Supabase로 옮긴다.
 
-실행: python migrate_to_supabase.py               (전체, 관리자 secret 키 필요: 이미지 표 수정 권한)
+실행: python migrate_to_supabase.py --images-only (새로 수집한 이미지 등록 — 평소에는 이것, 팀원 키로도 가능)
+      python migrate_to_supabase.py               (전체: 처음 한 번 DB로 옮길 때, 관리자 secret 키 필요)
       python migrate_to_supabase.py --evals-only  (유사 검색 평가만, 팀원 키로도 가능)
 여러 번 실행해도 안전하다.
-  - 이미지: 같은 id는 덮어씀 (이미지 파일 자체는 올리지 않고 메타데이터만)
-  - 태그: DB에 없는 key만 추가 (웹 '태그 관리'에서 고친 내용은 건드리지 않음)
+  - 이미지: 이 PC의 metadata.csv 중 DB에 없는 이미지만 추가. 이미 있는 이미지는 그대로 둔다 (이미지 파일 자체는 올리지 않음,
+    다른 팀원은 원본 주소로 본다)
+  - 태그: DB에 태그가 하나도 없을 때만 tags.yaml을 올린다 (태그는 웹 '태그 관리'가 기준 — 지운 태그가 되살아나지 않게)
   - 라벨: 같은 (이미지, 태그, 라벨러)는 덮어씀
   - 유사 검색 평가(eval_*.csv): DB에 없는 평가만 추가 (웹에서 새로 누른 평가는 덮어쓰지 않음)
 """
 import sys
 
+import imagehash
 import pandas as pd
 import yaml
+from PIL import Image
 
 from core.cli import quiet_streamlit, utf8_console
 
@@ -23,19 +27,32 @@ from core.evaluation import TABLE as EVAL_TABLE, csv_to_rows, load_evals_csv  # 
 from core.tagging import LABELS_CSV, TAGS_YAML, invalidate_tags_cache, load_labels_csv  # noqa: E402
 
 
-def migrate_images() -> int:
+def migrate_images(progress=print) -> tuple[int, int]:
+    """이 PC의 metadata.csv 중 DB에 없는 이미지만 등록한다. (metadata.csv의 이미지 수, 새로 등록한 수).
+
+    이미 있는 이미지는 건드리지 않는다(ON CONFLICT DO NOTHING) → 팀원 키(새 이미지 추가만 허용)로도 실행할 수 있다.
+    """
     df = read_local_metadata()  # 이 PC의 metadata.csv (DB 목록이 아니라 올릴 원본)
+    existing = {r["id"] for r in db.fetch_all("images", "id")}
+    new = df[~df["id"].isin(existing)]
+    if new.empty:
+        return len(df), 0
     phash_csv = CACHE_DIR / "phash.csv"
     phash = dict(pd.read_csv(phash_csv, dtype=str).values) if phash_csv.exists() else {}
+    progress(f"    새 이미지 {len(new):,}장 — 유사 검색용 해시 계산 중")
+    for image_id, path in zip(new["id"], new["img_path"]):  # 해시가 없으면 여기서 계산 (서버가 다시 내려받지 않게)
+        if image_id not in phash:
+            with Image.open(path) as img:
+                phash[image_id] = str(imagehash.phash(img))
 
     def num(v):
         return None if pd.isna(v) else int(v)
 
     rows = [{"id": r.id, "url": r.url, "source_page": r.source_page, "tags": r.tag_list,
              "width": num(r.width), "height": num(r.height), "phash": phash.get(r.id)}
-            for r in df.itertuples()]
-    db.upsert("images", rows, on_conflict="id")
-    return len(rows)
+            for r in new.itertuples()]
+    db.upsert("images", rows, on_conflict="id", ignore_duplicates=True)
+    return len(df), len(rows)
 
 
 def migrate_tags_yaml(path=TAGS_YAML) -> int:
@@ -92,6 +109,16 @@ def print_evals(results: list[tuple[str, int, int]]) -> None:
 
 
 def main() -> int:
+    if "--images-only" in sys.argv[1:]:
+        try:
+            print("이미지 등록 (metadata.csv) ...", flush=True)
+            total, new = migrate_images()
+        except Exception as e:
+            print(f"\n실패: {db.friendly_error(e)}", file=sys.stderr)
+            return 1
+        print(f"\n완료. 새 이미지 {new:,}장 추가 (이미 있던 {total - new:,}장은 그대로). "
+              "다른 팀원 앱에는 5분 안에 나타납니다.")
+        return 0
     if "--evals-only" in sys.argv[1:]:
         try:
             print("유사 검색 평가 (eval_*.csv) ...", flush=True)
@@ -103,11 +130,14 @@ def main() -> int:
         return 0
     try:
         print("1/4 이미지 메타데이터 (metadata.csv) ...", flush=True)
-        print(f"    {migrate_images()}건 업로드")
+        total, new = migrate_images()
+        print(f"    새 이미지 {new:,}장 추가 (이미 있던 {total - new:,}장은 그대로)")
         print("2/4 팀 태그 (tags.yaml) ...", flush=True)
-        if TAGS_YAML.exists():
+        if db.fetch_all("tags", "key"):
+            print("    DB에 태그가 있어 건너뜀 (태그는 웹앱 '태그 관리'가 기준 — 지운 태그가 되살아나지 않게)")
+        elif TAGS_YAML.exists():
             migrate_tags_yaml()
-            print(f"    DB 태그 {len(db.fetch_all('tags', 'key'))}개 (이미 있던 key는 그대로 둠)")
+            print(f"    DB 태그 {len(db.fetch_all('tags', 'key'))}개")
         else:
             print("    tags.yaml 없음 — 건너뜀 (태그는 웹앱 '태그 관리'에서 추가)")
         print("3/4 라벨 (labels.csv) ...", flush=True)

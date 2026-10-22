@@ -58,7 +58,7 @@ python -m streamlit run app.py
    - 예측은 다 올라간 뒤에만 팀 화면에 보입니다. 올리다 실패하면 팀 화면은 직전 학습 결과 그대로입니다.
 2. 결과는 같은 페이지의 **마지막 학습**에 나옵니다(다른 팀원 화면에는 1분 안에).
 
-**새 이미지 추가 (한 사람만)**: 수집 노트북으로 `drawing_ref_test/`에 받은 뒤, 관리자 키가 있는 PC에서 `python migrate_to_supabase.py`로 DB에 등록하면 다른 팀원은 아무것도 하지 않아도 5분 안에 앱에 나타납니다.
+**새 이미지 추가 (한 사람만)**: 수집 노트북으로 `drawing_ref_test/`에 받은 뒤, **같은 PC에서** `python migrate_to_supabase.py --images-only`로 DB에 등록하면(팀원 키로 가능) 다른 팀원은 아무것도 하지 않아도 5분 안에 앱에 나타납니다.
 
 개발자용: 터미널에서 `python training.py --email 내이메일`(공유) / `--no-share`(이 PC에만)로도 같은 학습을 할 수 있습니다.
 

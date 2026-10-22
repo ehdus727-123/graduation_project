@@ -312,3 +312,17 @@ revoke all on function public.finish_training_run(uuid, int, jsonb) from public;
 grant execute on function public.finish_training_run(uuid, int, jsonb) to anon, authenticated, service_role;
 revoke all on function public.touch_training_run(uuid, text) from public;
 grant execute on function public.touch_training_run(uuid, text) to anon, authenticated, service_role;
+
+-- =====================================================================
+-- 팀원 키(publishable)로도 새 이미지를 '추가'할 수 있게 (2026-10-22)
+-- 이미지 수집 담당자가 관리자 키 없이 자기 PC에서 python migrate_to_supabase.py --images-only 로 등록한다.
+-- 이미 있는 이미지는 건드리지 않는다(ON CONFLICT DO NOTHING). 수정·삭제는 계속 관리자 키만.
+-- 이 블록만 따로 실행해도 되고, 여러 번 실행해도 안전하다.
+-- =====================================================================
+grant insert on public.images to anon, authenticated;
+do $$
+begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'images' and policyname = 'images_insert') then
+    create policy images_insert on public.images for insert to anon, authenticated with check (true);
+  end if;
+end $$;

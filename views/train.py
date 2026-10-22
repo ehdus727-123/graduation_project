@@ -182,7 +182,7 @@ st.markdown(
     "- 중간에 앱(검은 창)을 꺼도 **다시 학습 시작을 누르면 이어서** 합니다(이미 추출한 이미지는 건너뜀, 최대 30초 분량만 다시).\n"
     "- 열 수 없는 이미지는 건너뛰고 결과에 목록을 보여줍니다.\n"
     "- 예측은 **다 올라간 뒤에** 팀원 화면(AI 추천·예측 확인·갤러리)에 1분 안에 반영됩니다. 올리다 실패하면 팀 화면은 직전 결과 그대로입니다.\n"
-    "- 새 이미지를 추가했다면 먼저 관리자 PC에서 `python migrate_to_supabase.py`로 DB에 등록하세요(등록 안 된 이미지의 예측은 공유되지 않음).")
+    "- 새 이미지를 추가했다면 먼저 수집한 PC에서 `python migrate_to_supabase.py --images-only`로 DB에 등록하세요(등록 안 된 이미지의 예측은 공유되지 않음).")
 with st.expander("개발자용: 터미널에서 학습"):
     st.code("python training.py --email 내이메일@example.com   # 팀에 공유\npython training.py --no-share                      # 이 PC에만 저장",
             language="bash")
